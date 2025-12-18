@@ -1,0 +1,48 @@
+# ============================================================================
+# 1. SSH 优先通道
+# ============================================================================
+pass tcp any any -> any 22 (msg:"Allow SSH Inbound"; sid:10001; rev:1;)
+pass tcp any 22 -> any any (msg:"Allow SSH Outbound"; sid:10002; rev:1;)
+
+# ============================================================================
+# 2. 基础设施：DNS
+# ============================================================================
+pass udp any any -> any 53 (msg:"Allow DNS UDP"; sid:10003; rev:1;)
+pass tcp any any -> any 53 (msg:"Allow DNS TCP"; sid:10004; rev:1;)
+
+# ============================================================================
+# 3. 业务逻辑：TLS 检查 (Google 白名单)
+# ============================================================================
+# 3.1 协议清洗
+drop udp any any -> any 443 (msg:"Drop QUIC"; sid:10005; rev:1;)
+
+# 3.2 打标签：Google
+pass tls any any -> any 443 (msg:"Tag Google TLS"; tls.sni; dotprefix; content:"google.com"; nocase; endswith; flowbits:set,allow_tls; flowbits:noalert; sid:10006; rev:1;)
+pass tls any any -> any 443 (msg:"Tag Google Root TLS"; tls.sni; content:"google.com"; nocase; isdataat:!1,relative; flowbits:set,allow_tls; flowbits:noalert; sid:10007; rev:1;)
+
+# 3.3 拦截：没有标签的 TLS 统统杀掉
+# Baidu 的 Client Hello 虽然是 TCP，但也是 TLS。如果它想过，必须通过这一关。
+# 因为它没标签，所以会被这里杀掉。
+drop tls any any -> any 443 (msg:"Drop Blocked TLS"; flowbits:isnotset,allow_tls; sid:10008; rev:1;)
+
+# ============================================================================
+# 4. 放行通道 (严格限制)
+# ============================================================================
+# 4.1 放行 Google 数据
+# 只有带标签的 Google 数据包，才允许携带载荷通过
+pass tcp any any -> any 443 (msg:"Pass Whitelisted Data"; flowbits:isset,allow_tls; sid:10009; rev:1;)
+
+# 4.2 放行 TCP 纯握手包 (关键修改!!!)
+# ----------------------------------------------------------------------
+# dsize:0 意味着只允许 "没有数据载荷" 的包通过。
+# 包括：SYN, SYN-ACK, ACK, FIN, RST。
+# 排除：Client Hello, Server Hello, HTTP Body 等任何带数据的包。
+# 效果：Baidu 的握手能通，但一旦它发 Client Hello (有数据)，这条规则就不匹配了，
+# 它只能回头去撞 Rule 10008 (Drop TLS)，然后被杀。
+# ----------------------------------------------------------------------
+pass tcp any any <> any 443 (msg:"Allow TCP Handshake No-Data"; dsize:0; sid:10010; rev:1;)
+
+# ============================================================================
+# 5. 兜底策略
+# ============================================================================
+drop ip any any <> any any (msg:"Default Deny All"; sid:10011; rev:1;)
